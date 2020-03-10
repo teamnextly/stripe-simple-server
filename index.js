@@ -4,8 +4,50 @@ const app = express();
 const { resolve } = require('path');
 // Copy the .env.example in the root into a .env file in this folder
 
+const low = require('lowdb');
+const FileSync = require('lowdb/adapters/FileSync');
+
+const adapter = new FileSync('db.json');
+const db = low(adapter);
+db.defaults({ users: [] }).write();
+
 const env = require('dotenv').config({ path: './.env' });
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
+const config = {
+  publicKey: process.env.STRIPE_PUBLISHABLE_KEY,
+  plans: [
+    {
+      id: process.env.INDIVIDUAL_PLAN_ID,
+      plan: 'INDIVIDUAL',
+      price: 'FREE',
+      frequency: '',
+      description: 'Ad Supported',
+      validFor: 'Unlimited',
+      title: 'Individual Access'
+    },
+    {
+      id: process.env.SPEAKER_PLAN_ID,
+      plan: 'SPEAKER',
+      price: '9.99',
+      frequency: 'monthly',
+      description: 'Great for speakers and Entrepreneurs',
+      validFor: '12 months',
+      title: 'Speaker Membership',
+      bestValue: true
+    },
+    {
+      id: process.env.CORPORATE_PLAN_ID,
+      plan: 'CORPORATE',
+      price: '',
+      priceSubCaption: 'Please contact us for pricing',
+      frequency: '',
+      description: 'Great for large groups',
+      validFor: '12 months',
+      title: 'For up to 10 end-users'
+    }
+  ]
+};
 
 app.use(cors());
 
@@ -27,6 +69,29 @@ app.use(
 //   res.sendFile(path);
 // });
 
+const getCustomer = async email => {
+  console.log('called');
+  const user = db
+    .get('users')
+    .find({ email })
+    .value();
+  let customer = null;
+
+  if (user) {
+    customer = await stripe.customers.retrieve(user.customerId);
+  } else {
+    const customerReturned = await stripe.customers.create({
+      email: email
+    });
+    // console.log(customerReturned);
+    db.get('users')
+      .push({ email, customerId: customerReturned.id })
+      .write();
+    customer = customerReturned;
+  }
+  return customer;
+};
+
 // Fetch the Checkout Session to display the JSON result on the success page
 app.get('/checkout-session', async (req, res) => {
   const { sessionId } = req.query;
@@ -34,17 +99,50 @@ app.get('/checkout-session', async (req, res) => {
   res.send(session);
 });
 
+app.post('/retrieve-customer', async (req, res) => {
+  try {
+    const { email } = req.body;
+    const user = db
+      .get('users')
+      .find({ email })
+      .value();
+
+    console.log(email, user);
+    let customer = null;
+    console.log(user);
+    if (user) {
+      customer = await stripe.customers.retrieve(user.customerId);
+      console.log(customer);
+    }
+    res.json(customer);
+  } catch (err) {
+    return res.status(500).json({ error: err });
+  }
+});
+
+app.post('/create-subscription', async (req, res) => {
+  const { email, planId } = req.body;
+
+  const customer = await getCustomer(email);
+  if (!customer)
+    return res.status(500).json({ error: 'An error has occurred' });
+  const subscription = await stripe.subscriptions.create({
+    customer: customer.id,
+    items: [{ plan: planId }]
+  });
+  res.send(subscription);
+});
+
 app.post('/create-checkout-session', async (req, res) => {
   const domainURL = process.env.DOMAIN;
-  const { planId } = req.body;
+  const { planId, email } = req.body;
 
-  // Create new Checkout Session for the order
-  // Other optional params include:
-  // [billing_address_collection] - to display billing address details on the page
-  // [customer] - if you have an existing Stripe Customer ID
-  // [customer_email] - lets you prefill the email input in the form
-  // For full details see https://stripe.com/docs/api/checkout/sessions/create
+  const customer = await getCustomer(email);
+  if (!customer)
+    return res.status(500).json({ error: 'An error has occurred' });
+
   session = await stripe.checkout.sessions.create({
+    customer: customer.id,
     payment_method_types: ['card'],
     subscription_data: { items: [{ plan: planId }] },
     // ?session_id={CHECKOUT_SESSION_ID} means the redirect will have the session ID set as a query param
@@ -52,46 +150,47 @@ app.post('/create-checkout-session', async (req, res) => {
     cancel_url: `${domainURL}/plans/cancel`
   });
 
+  console.log(
+    planId,
+    config.plans.find(plan => plan.id === planId)
+  );
+
   res.send({
-    sessionId: session.id
+    sessionId: session.id,
+    plan: config.plans.find(plan => plan.id === planId)
   });
 });
 
-app.get('/setup', (req, res) => {
-  res.send({
-    publicKey: process.env.STRIPE_PUBLISHABLE_KEY,
-    plans: [
-      {
-        id: process.env.INDIVIDUAL_PLAN_ID,
-        plan: 'INDIVIDUAL',
-        price: 'FREE',
-        frequency: '',
-        description: 'Ad Supported',
-        validFor: 'Unlimited',
-        title: 'Individual Access'
-      },
-      {
-        id: process.env.SPEAKER_PLAN_ID,
-        plan: 'SPEAKER',
-        price: '9.99',
-        frequency: 'monthly',
-        description: 'Great for speakers and Entrepreneurs',
-        validFor: '12 months',
-        title: 'Speaker Membership',
-        bestValue: true
-      },
-      {
-        id: process.env.CORPORATE_PLAN_ID,
-        plan: 'CORPORATE',
-        price: '',
-        priceSubCaption: 'Please contact us for pricing',
-        frequency: '',
-        description: 'Great for large groups',
-        validFor: '12 months',
-        title: 'For up to 10 end-users'
-      }
-    ]
-  });
+const hasSubscription = (planId, customer) => {
+  const planSubscriptions = customer.subscriptions.data.find(
+    sub => sub.plan.id === planId
+  );
+  console.log(Boolean(planSubscriptions));
+  return Boolean(planSubscriptions);
+};
+
+app.post('/setup', async (req, res) => {
+  //   try {
+  const { email } = req.body;
+  const user = db
+    .get('users')
+    .find({ email })
+    .value();
+
+  console.log(email, user);
+  let customer = null;
+  console.log(user);
+  if (user) {
+    customer = await stripe.customers.retrieve(user.customerId);
+    const newPlanData = config.plans.map(v => ({
+      ...v,
+      subscribed: hasSubscription(v.id, customer)
+    }));
+    res.send({ ...config, plans: newPlanData, customer });
+  } else res.send({ ...config, customer });
+  //   } catch (err) {
+  //     return res.status(500).json({ error: err });
+  //   }
 });
 
 // Webhook handler for asynchronous events.
