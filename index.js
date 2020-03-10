@@ -6,7 +6,7 @@ const { resolve } = require('path');
 
 const low = require('lowdb');
 const FileSync = require('lowdb/adapters/FileSync');
-
+const get = require('lodash').get;
 const adapter = new FileSync('db.json');
 const db = low(adapter);
 db.defaults({ users: [] }).write();
@@ -120,17 +120,65 @@ app.post('/retrieve-customer', async (req, res) => {
   }
 });
 
+app.post('/user-subscription', async (req, res) => {
+  const { email } = req.body;
+
+  const customer = await getCustomer(email);
+  const currentSubscription = get(customer, 'subscriptions.data[0]');
+
+  if (currentSubscription) {
+    return res.json(currentSubscription);
+  }
+});
+
 app.post('/create-subscription', async (req, res) => {
   const { email, planId } = req.body;
 
   const customer = await getCustomer(email);
   if (!customer)
     return res.status(500).json({ error: 'An error has occurred' });
-  const subscription = await stripe.subscriptions.create({
-    customer: customer.id,
-    items: [{ plan: planId }]
-  });
-  res.send(subscription);
+
+  const currentSubscription = get(customer, 'subscriptions.data[0]');
+
+  if (currentSubscription) {
+    return res.status(400).json({
+      error:
+        'You already have an active subscription, cancel it to start another'
+    });
+  } else {
+    const subscription = await stripe.subscriptions.create({
+      customer: customer.id,
+      items: [{ plan: planId }]
+    });
+    res.send(subscription);
+  }
+});
+
+app.post('/cancel-subscription', async (req, res) => {
+  const { email } = req.body;
+
+  const customer = await getCustomer(email);
+  const currentSubscription = get(customer, 'subscriptions.data[0]');
+
+  if (
+    currentSubscription &&
+    !currentSubscription.cancel_at_period_end &&
+    !currentSubscription.canceled_at
+  ) {
+    if (currentSubscription.plan.id === process.env.INDIVIDUAL_PLAN_ID) {
+      stripe.subscriptions.del(currentSubscription.id);
+    } else if (currentSubscription.plan.id === process.env.SPEAKER_PLAN_ID) {
+      stripe.subscriptions.update(currentSubscription.id, {
+        cancel_at_period_end: true
+      });
+    }
+
+    return res.send({ currentSubscription });
+  }
+
+  return res
+    .status(400)
+    .json({ error: "You don't have a currently active subscription" });
 });
 
 app.post('/create-checkout-session', async (req, res) => {
@@ -141,14 +189,23 @@ app.post('/create-checkout-session', async (req, res) => {
   if (!customer)
     return res.status(500).json({ error: 'An error has occurred' });
 
-  session = await stripe.checkout.sessions.create({
-    customer: customer.id,
-    payment_method_types: ['card'],
-    subscription_data: { items: [{ plan: planId }] },
-    // ?session_id={CHECKOUT_SESSION_ID} means the redirect will have the session ID set as a query param
-    success_url: `${domainURL}/plans/success/{CHECKOUT_SESSION_ID}`,
-    cancel_url: `${domainURL}/plans/cancel`
-  });
+  const hasSubscription = get(customer, 'subscriptions.data[0].id');
+
+  if (hasSubscription) {
+    return res.status(400).json({
+      error:
+        'You already have an active subscription, cancel it to start another'
+    });
+  } else {
+    session = await stripe.checkout.sessions.create({
+      customer: customer.id,
+      payment_method_types: ['card'],
+      subscription_data: { items: [{ plan: planId }] },
+      // ?session_id={CHECKOUT_SESSION_ID} means the redirect will have the session ID set as a query param
+      success_url: `${domainURL}/plans/success/{CHECKOUT_SESSION_ID}`,
+      cancel_url: `${domainURL}/plans/cancel`
+    });
+  }
 
   console.log(
     planId,
