@@ -2,6 +2,15 @@
 
 Example server for stripe integration
 
+```
+yarn
+yarn start
+```
+
+hosted at ```http://localhost:4242```
+
+
+
 ### Mutations and queries needed:
 
 - Get Available Plans:
