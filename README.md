@@ -9,7 +9,9 @@ yarn start
 
 hosted at ```http://localhost:4242```
 
+The server must be running for the /plans and /profile page to work (show the plans and subscriptions)
 
+PS: I am using the email as an indentifier that's ṕassed on the request body, but you should not need this, as you already have the user information from the Bearer JWT Token.
 
 ### Mutations and queries needed:
 
@@ -71,7 +73,7 @@ hosted at ```http://localhost:4242```
 
 - Retrieve user subscription
 	
-	Get the customer active subscription details, billing period, status, etc.
+	Get the customer current active subscription details, billing period, status, etc.
 
 - Contact Mutation
 	
